@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/expr-lang/expr"
+	"github.com/expr-lang/expr/vm"
 	"github.com/fatih/color"
+	"github.com/go-faster/errors"
 	"github.com/go-faster/jx"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/peers"
@@ -38,6 +40,7 @@ type ExportOptions struct {
 	WithContent bool
 	Raw         bool
 	All         bool
+	URLs        []string // telegram message links to export
 }
 
 type Message struct {
@@ -72,23 +75,32 @@ func Export(ctx context.Context, c *telegram.Client, kvd storage.Storage, opts E
 		return fmt.Errorf("failed to compile filter: %w", err)
 	}
 
-	var peer peers.Peer
-
 	manager := peers.Options{Storage: storage.NewPeers(kvd)}.Build(c.API())
-	if opts.Chat == "" { // defaults to me(saved messages)
-		peer, err = manager.Self(ctx)
-	} else {
+
+	// Determine peer for JSON id field
+	var peer peers.Peer
+	if opts.Chat != "" {
 		peer, err = tutil.GetInputPeer(ctx, manager, opts.Chat)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to get peer: %w", err)
+		if err != nil {
+			return fmt.Errorf("failed to get peer: %w", err)
+		}
+	} else if len(opts.URLs) > 0 {
+		// URL-only mode: use first URL's peer
+		peer, _, err = tutil.ParseMessageLink(ctx, manager, opts.URLs[0])
+		if err != nil {
+			return fmt.Errorf("failed to parse first URL: %w", err)
+		}
+	} else {
+		// defaults to me(saved messages)
+		peer, err = manager.Self(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get peer: %w", err)
+		}
 	}
 
 	color.Yellow("WARN: Export only generates minimal JSON for tdl download, not for backup.")
 	color.Cyan("Occasional suspensions are due to Telegram rate limitations, please wait a moment.")
 	fmt.Println()
-
-	color.Blue("Type: %s | Input: %v", opts.Type, opts.Input)
 
 	pw := prog.New(progress.FormatNumber)
 	pw.SetUpdateFrequency(200 * time.Millisecond)
@@ -96,26 +108,7 @@ func Export(ctx context.Context, c *telegram.Client, kvd storage.Storage, opts E
 	pw.Style().Visibility.ETA = false
 	pw.Style().Visibility.Percentage = false
 
-	tracker := prog.AppendTracker(pw, progress.FormatNumber, fmt.Sprintf("%s-%d", peer.VisibleName(), peer.ID()), 0)
-
 	go pw.Render()
-
-	var q messages.Query
-	switch {
-	case opts.Thread != 0: // topic messages, reply messages
-		q = query.NewQuery(c.API()).Messages().GetReplies(peer.InputPeer()).MsgID(opts.Thread)
-	default: // history
-		q = query.NewQuery(c.API()).Messages().GetHistory(peer.InputPeer())
-	}
-	iter := messages.NewIterator(q, 100)
-
-	switch opts.Type {
-	case ExportTypeTime:
-		iter = iter.OffsetDate(opts.Input[1] + 1)
-	case ExportTypeId:
-		iter = iter.OffsetID(opts.Input[1] + 1) // #89: retain the last msg id
-	case ExportTypeLast:
-	}
 
 	f, err := os.Create(opts.Output)
 	if err != nil {
@@ -151,74 +144,180 @@ func Export(ctx context.Context, c *telegram.Client, kvd storage.Storage, opts E
 
 	count := int64(0)
 
-loop:
-	for iter.Next(ctx) {
-		msg := iter.Value()
+	// Export from chat if -c is specified or no URLs provided (for saved messages)
+	if opts.Chat != "" || len(opts.URLs) == 0 {
+		color.Blue("Type: %s | Input: %v", opts.Type, opts.Input)
+
+		tracker := prog.AppendTracker(pw, progress.FormatNumber, fmt.Sprintf("%s-%d", peer.VisibleName(), peer.ID()), 0)
+
+		var q messages.Query
+		switch {
+		case opts.Thread != 0: // topic messages, reply messages
+			q = query.NewQuery(c.API()).Messages().GetReplies(peer.InputPeer()).MsgID(opts.Thread)
+		default: // history
+			q = query.NewQuery(c.API()).Messages().GetHistory(peer.InputPeer())
+		}
+		iter := messages.NewIterator(q, 100)
+
 		switch opts.Type {
 		case ExportTypeTime:
-			if msg.Msg.GetDate() < opts.Input[0] {
-				break loop
-			}
+			iter = iter.OffsetDate(opts.Input[1] + 1)
 		case ExportTypeId:
-			if msg.Msg.GetID() < opts.Input[0] {
-				break loop
-			}
+			iter = iter.OffsetID(opts.Input[1] + 1) // #89: retain the last msg id
 		case ExportTypeLast:
-			if count >= int64(opts.Input[0]) {
-				break loop
+		}
+
+	loop:
+		for iter.Next(ctx) {
+			msg := iter.Value()
+			switch opts.Type {
+			case ExportTypeTime:
+				if msg.Msg.GetDate() < opts.Input[0] {
+					break loop
+				}
+			case ExportTypeId:
+				if msg.Msg.GetID() < opts.Input[0] {
+					break loop
+				}
+			case ExportTypeLast:
+				if count >= int64(opts.Input[0]) {
+					break loop
+				}
 			}
+
+			m, ok := msg.Msg.(*tg.Message)
+			if !ok {
+				continue
+			}
+			// only get media messages
+			media, ok := tmedia.GetMedia(m)
+			if !ok && !opts.All {
+				continue
+			}
+
+			b, err := texpr.Run(filter, texpr.ConvertEnvMessage(m))
+			if err != nil {
+				return fmt.Errorf("failed to run filter: %w", err)
+			}
+			if !b.(bool) { // filtered
+				continue
+			}
+
+			fileName := ""
+			if media != nil { // #207
+				fileName = media.Name
+			}
+			t := &Message{
+				ID:   m.ID,
+				Type: "message",
+				File: fileName,
+			}
+			if opts.WithContent {
+				t.Date = m.Date
+				t.Text = m.Message
+			}
+			if opts.Raw {
+				t.Raw = m
+			}
+
+			mb, err := json.Marshal(t)
+			if err != nil {
+				return fmt.Errorf("failed to marshal message: %w", err)
+			}
+			enc.Raw(mb)
+
+			count++
+			tracker.SetValue(count)
 		}
 
-		m, ok := msg.Msg.(*tg.Message)
-		if !ok {
-			continue
-		}
-		// only get media messages
-		media, ok := tmedia.GetMedia(m)
-		if !ok && !opts.All {
-			continue
+		if err = iter.Err(); err != nil {
+			return err
 		}
 
-		b, err := texpr.Run(filter, texpr.ConvertEnvMessage(m))
+		tracker.MarkAsDone()
+	}
+
+	// Export from URLs if -u is specified
+	if len(opts.URLs) > 0 {
+		urlCount, err := exportURLMessages(ctx, c.API(), manager, pw, opts, filter, enc)
 		if err != nil {
-			return fmt.Errorf("failed to run filter: %w", err)
+			return err
+		}
+		count += urlCount
+	}
+
+	prog.Wait(ctx, pw)
+	return nil
+}
+
+func exportURLMessages(ctx context.Context, api *tg.Client, manager *peers.Manager,
+	pw progress.Writer, opts ExportOptions, filter *vm.Program, enc *jx.Encoder) (int64, error) {
+
+	color.Blue("URLs: %d message(s)", len(opts.URLs))
+
+	tracker := prog.AppendTracker(pw, progress.FormatNumber, "URLs", int64(len(opts.URLs)))
+
+	count := int64(0)
+
+	for _, u := range opts.URLs {
+		peer, msgID, err := tutil.ParseMessageLink(ctx, manager, u)
+		if err != nil {
+			return count, fmt.Errorf("failed to parse URL %s: %w", u, err)
+		}
+
+		msg, err := tutil.GetSingleMessage(ctx, api, peer.InputPeer(), msgID)
+		if err != nil {
+			if errors.Is(err, tutil.ErrMessageDeleted) {
+				color.Yellow("Skipping deleted message: %s", u)
+				tracker.Increment(1)
+				continue
+			}
+			return count, fmt.Errorf("failed to get message from %s: %w", u, err)
+		}
+
+		// only get media messages
+		media, ok := tmedia.GetMedia(msg)
+		if !ok && !opts.All {
+			tracker.Increment(1)
+			continue
+		}
+
+		b, err := texpr.Run(filter, texpr.ConvertEnvMessage(msg))
+		if err != nil {
+			return count, fmt.Errorf("failed to run filter: %w", err)
 		}
 		if !b.(bool) { // filtered
+			tracker.Increment(1)
 			continue
 		}
 
 		fileName := ""
-		if media != nil { // #207
+		if media != nil {
 			fileName = media.Name
 		}
 		t := &Message{
-			ID:   m.ID,
+			ID:   msg.ID,
 			Type: "message",
 			File: fileName,
 		}
 		if opts.WithContent {
-			t.Date = m.Date
-			t.Text = m.Message
+			t.Date = msg.Date
+			t.Text = msg.Message
 		}
 		if opts.Raw {
-			t.Raw = m
+			t.Raw = msg
 		}
 
 		mb, err := json.Marshal(t)
 		if err != nil {
-			return fmt.Errorf("failed to marshal message: %w", err)
+			return count, fmt.Errorf("failed to marshal message: %w", err)
 		}
 		enc.Raw(mb)
 
 		count++
-		tracker.SetValue(count)
-	}
-
-	if err = iter.Err(); err != nil {
-		return err
+		tracker.Increment(1)
 	}
 
 	tracker.MarkAsDone()
-	prog.Wait(ctx, pw)
-	return nil
+	return count, nil
 }

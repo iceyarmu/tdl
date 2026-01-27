@@ -57,6 +57,13 @@ func NewChatExport() *cobra.Command {
 		Use:   "export",
 		Short: "export messages from (protected) chat for download",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// URL-only mode: skip type/input validation
+			if len(opts.URLs) > 0 && opts.Chat == "" {
+				return tRun(cmd.Context(), func(ctx context.Context, c *telegram.Client, kvd storage.Storage) error {
+					return chat.Export(logctx.Named(ctx, "export"), c, kvd, opts)
+				}, limiter)
+			}
+
 			switch opts.Type {
 			case chat.ExportTypeTime, chat.ExportTypeId:
 				// set default value
@@ -108,6 +115,7 @@ func NewChatExport() *cobra.Command {
 	cmd.Flags().BoolVar(&opts.WithContent, "with-content", false, "export with message content")
 	cmd.Flags().BoolVar(&opts.Raw, "raw", false, "export raw message struct of Telegram MTProto API, useful for debugging")
 	cmd.Flags().BoolVar(&opts.All, "all", false, "export all messages including non-media messages, but still affected by filter and type flag")
+	cmd.Flags().StringSliceVarP(&opts.URLs, "url", "u", []string{}, "telegram message links to export")
 
 	// completion and validation
 	_ = cmd.RegisterFlagCompletionFunc(input, func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
