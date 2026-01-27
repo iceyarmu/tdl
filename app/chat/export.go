@@ -85,10 +85,16 @@ func Export(ctx context.Context, c *telegram.Client, kvd storage.Storage, opts E
 			return fmt.Errorf("failed to get peer: %w", err)
 		}
 	} else if len(opts.URLs) > 0 {
-		// URL-only mode: use first URL's peer
-		peer, _, err = tutil.ParseMessageLink(ctx, manager, opts.URLs[0])
-		if err != nil {
-			return fmt.Errorf("failed to parse first URL: %w", err)
+		// URL-only mode: find first valid URL's peer
+		for _, u := range opts.URLs {
+			peer, _, err = tutil.ParseMessageLink(ctx, manager, u)
+			if err == nil {
+				break
+			}
+			color.Yellow("Skipping invalid URL: %s (%v)", u, err)
+		}
+		if peer == nil {
+			return fmt.Errorf("no valid URLs provided")
 		}
 	} else {
 		// defaults to me(saved messages)
@@ -262,7 +268,9 @@ func exportURLMessages(ctx context.Context, api *tg.Client, manager *peers.Manag
 	for _, u := range opts.URLs {
 		peer, msgID, err := tutil.ParseMessageLink(ctx, manager, u)
 		if err != nil {
-			return count, fmt.Errorf("failed to parse URL %s: %w", u, err)
+			color.Yellow("Skipping invalid URL: %s (%v)", u, err)
+			tracker.Increment(1)
+			continue
 		}
 
 		msg, err := tutil.GetSingleMessage(ctx, api, peer.InputPeer(), msgID)
