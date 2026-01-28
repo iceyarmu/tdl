@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/expr-lang/expr"
@@ -27,6 +28,9 @@ import (
 	"github.com/iyear/tdl/pkg/texpr"
 )
 
+// telegramLinkRegex matches Telegram message links
+var telegramLinkRegex = regexp.MustCompile(`https?://t\.me/[^\s\)>\]]+`)
+
 //go:generate go-enum --names --values --flag --nocase
 
 type ExportOptions struct {
@@ -41,6 +45,7 @@ type ExportOptions struct {
 	Raw         bool
 	All         bool
 	URLs        []string // telegram message links to export
+	DetectLink  bool     // detect and export telegram links found in message text
 }
 
 type Message struct {
@@ -151,6 +156,8 @@ func Export(ctx context.Context, c *telegram.Client, kvd storage.Storage, opts E
 	count := int64(0)
 
 	// Export from chat if -c is specified or no URLs provided (for saved messages)
+	var extractedURLs []string // for --detect-link
+
 	if opts.Chat != "" || len(opts.URLs) == 0 {
 		color.Blue("Type: %s | Input: %v", opts.Type, opts.Input)
 
@@ -197,8 +204,15 @@ func Export(ctx context.Context, c *telegram.Client, kvd storage.Storage, opts E
 			}
 			// only get media messages
 			media, ok := tmedia.GetMedia(m)
-			if !ok && !opts.All {
-				continue
+			if !ok {
+				// No media - check for links in text if DetectLink is enabled
+				if opts.DetectLink && m.Message != "" {
+					links := telegramLinkRegex.FindAllString(m.Message, -1)
+					extractedURLs = append(extractedURLs, links...)
+				}
+				if !opts.All {
+					continue
+				}
 			}
 
 			b, err := texpr.Run(filter, texpr.ConvertEnvMessage(m))
@@ -241,6 +255,20 @@ func Export(ctx context.Context, c *telegram.Client, kvd storage.Storage, opts E
 		}
 
 		tracker.MarkAsDone()
+	}
+
+	// Process detected links from message text
+	if opts.DetectLink && len(extractedURLs) > 0 {
+		uniqueURLs := uniqueStrings(extractedURLs)
+		color.Blue("Detected %d unique links from message text", len(uniqueURLs))
+
+		urlOpts := opts
+		urlOpts.URLs = uniqueURLs
+		urlCount, err := exportURLMessages(ctx, c.API(), manager, pw, urlOpts, filter, enc)
+		if err != nil {
+			return err
+		}
+		count += urlCount
 	}
 
 	// Export from URLs if -u is specified
@@ -328,4 +356,16 @@ func exportURLMessages(ctx context.Context, api *tg.Client, manager *peers.Manag
 
 	tracker.MarkAsDone()
 	return count, nil
+}
+
+func uniqueStrings(input []string) []string {
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(input))
+	for _, s := range input {
+		if !seen[s] {
+			seen[s] = true
+			result = append(result, s)
+		}
+	}
+	return result
 }

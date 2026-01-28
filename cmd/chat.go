@@ -116,6 +116,7 @@ func NewChatExport() *cobra.Command {
 	cmd.Flags().BoolVar(&opts.Raw, "raw", false, "export raw message struct of Telegram MTProto API, useful for debugging")
 	cmd.Flags().BoolVar(&opts.All, "all", false, "export all messages including non-media messages, but still affected by filter and type flag")
 	cmd.Flags().StringSliceVarP(&opts.URLs, "url", "u", []string{}, "telegram message links to export")
+	cmd.Flags().BoolVar(&opts.DetectLink, "detect-link", false, "detect and export telegram links found in message text")
 
 	// completion and validation
 	_ = cmd.RegisterFlagCompletionFunc(input, func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
