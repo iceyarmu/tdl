@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/expr-lang/expr"
@@ -29,6 +30,14 @@ import (
 
 //go:generate go-enum --names --values --flag --nocase
 
+// telegramLinkPattern matches Telegram message URLs in text
+var telegramLinkPattern = regexp.MustCompile(`https?://t\.me/[^\s]+`)
+
+// extractTelegramLinks extracts all potential Telegram message links from text
+func extractTelegramLinks(text string) []string {
+	return telegramLinkPattern.FindAllString(text, -1)
+}
+
 type ExportOptions struct {
 	Type        ExportType
 	Chat        string
@@ -44,12 +53,13 @@ type ExportOptions struct {
 }
 
 type Message struct {
-	ID   int         `json:"id"`
-	Type string      `json:"type"`
-	File string      `json:"file"`
-	Date int         `json:"date,omitempty"`
-	Text string      `json:"text,omitempty"`
-	Raw  *tg.Message `json:"raw,omitempty"`
+	ID        int         `json:"id"`
+	Type      string      `json:"type"`
+	File      string      `json:"file"`
+	ChannelID int64       `json:"ChannelID,omitempty"`
+	Date      int         `json:"date,omitempty"`
+	Text      string      `json:"text,omitempty"`
+	Raw       *tg.Message `json:"raw,omitempty"`
 }
 
 // ExportType
@@ -195,9 +205,81 @@ func Export(ctx context.Context, c *telegram.Client, kvd storage.Storage, opts E
 			if !ok {
 				continue
 			}
-			// only get media messages
-			media, ok := tmedia.GetMedia(m)
-			if !ok && !opts.All {
+
+			// Check if message has media
+			media, hasMedia := tmedia.GetMedia(m)
+
+			// Link expansion: if message has no media but has text, check for t.me links
+			if !hasMedia && m.Message != "" {
+				links := extractTelegramLinks(m.Message)
+				if len(links) > 0 {
+					// Process links and add fetched messages
+					for _, link := range links {
+						linkPeer, msgID, err := tutil.ParseMessageLink(ctx, manager, link)
+						if err != nil {
+							color.Yellow("Skipping invalid link (message %d): %s (%v)", m.ID, link, err)
+							continue
+						}
+
+						linkedMsg, err := tutil.GetSingleMessage(ctx, c.API(), linkPeer.InputPeer(), msgID)
+						if err != nil {
+							if errors.Is(err, tutil.ErrMessageDeleted) {
+								color.Yellow("Skipping deleted message: %s", link)
+							} else {
+								color.Yellow("Failed to fetch linked message: %s (%v)", link, err)
+							}
+							continue
+						}
+
+						// Check if linked message has media
+						linkedMedia, linkedHasMedia := tmedia.GetMedia(linkedMsg)
+						if !linkedHasMedia && !opts.All {
+							continue
+						}
+
+						// Apply filter to linked message
+						b, err := texpr.Run(filter, texpr.ConvertEnvMessage(linkedMsg))
+						if err != nil {
+							return fmt.Errorf("failed to run filter on linked message: %w", err)
+						}
+						if !b.(bool) {
+							continue
+						}
+
+						fileName := ""
+						if linkedMedia != nil {
+							fileName = linkedMedia.Name
+						}
+
+						t := &Message{
+							ID:        linkedMsg.ID,
+							Type:      "message",
+							File:      fileName,
+							ChannelID: linkPeer.ID(),
+						}
+						if opts.WithContent {
+							t.Date = linkedMsg.Date
+							t.Text = linkedMsg.Message
+						}
+						if opts.Raw {
+							t.Raw = linkedMsg
+						}
+
+						mb, err := json.Marshal(t)
+						if err != nil {
+							return fmt.Errorf("failed to marshal linked message: %w", err)
+						}
+						enc.Raw(mb)
+
+						count++
+						tracker.SetValue(count)
+					}
+					continue // Skip original message since we processed its links
+				}
+			}
+
+			// Original logic for messages without link expansion
+			if !hasMedia && !opts.All {
 				continue
 			}
 
