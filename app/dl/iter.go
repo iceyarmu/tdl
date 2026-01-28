@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"text/template"
 	"time"
@@ -155,7 +156,18 @@ func (i *iter) process(ctx context.Context) (ret bool, skip bool) {
 		return false, false
 	}
 
-	peer, msg := i.dialogs[i.dialogIndex].Peer, i.dialogs[i.dialogIndex].Messages[i.messageIndex]
+	msgItem := i.dialogs[i.dialogIndex].Messages[i.messageIndex]
+	peer := i.dialogs[i.dialogIndex].Peer
+
+	// 如果消息有自己的 ChannelID，解析对应的 peer
+	if msgItem.ChannelID != 0 {
+		resolvedPeer, err := tutil.GetInputPeer(ctx, i.manager, strconv.FormatInt(msgItem.ChannelID, 10))
+		if err != nil {
+			i.err = errors.Wrapf(err, "resolve channel %d for message %d", msgItem.ChannelID, msgItem.ID)
+			return false, false
+		}
+		peer = resolvedPeer.InputPeer()
+	}
 
 	// Record current logical position before processing
 	startLogicalPos := i.logicalPos
@@ -173,17 +185,17 @@ func (i *iter) process(ctx context.Context) (ret bool, skip bool) {
 		i.err = errors.Wrap(err, "resolve from input peer")
 		return false, false
 	}
-	message, err := tutil.GetSingleMessage(ctx, i.pool.Default(ctx), peer, msg)
+	message, err := tutil.GetSingleMessage(ctx, i.pool.Default(ctx), peer, msgItem.ID)
 	if err != nil {
 		// Check if the error is due to a deleted message
 		if errors.Is(err, tutil.ErrMessageDeleted) {
 			logctx.From(ctx).Info("Message may be deleted, skipping",
 				zap.Int64("dialog_id", tutil.GetInputPeerID(peer)),
-				zap.Int("message_id", msg),
+				zap.Int("message_id", msgItem.ID),
 			)
-			i.skippedDeleted.Inc()                                                                     // increment skipped deleted counter
-			i.deletedIDs = append(i.deletedIDs, fmt.Sprintf("%d/%d", tutil.GetInputPeerID(peer), msg)) // track deleted message ID
-			i.logicalPos++                                                                             // increment logical position for skipped message
+			i.skippedDeleted.Inc()                                                                          // increment skipped deleted counter
+			i.deletedIDs = append(i.deletedIDs, fmt.Sprintf("%d/%d", tutil.GetInputPeerID(peer), msgItem.ID)) // track deleted message ID
+			i.logicalPos++                                                                                   // increment logical position for skipped message
 			return false, true
 		}
 		i.err = errors.Wrap(err, "resolve message")
@@ -396,9 +408,9 @@ func sortDialogs(dialogs []*tmessage.Dialog, desc bool) {
 	for _, m := range dialogs {
 		sort.Slice(m.Messages, func(i, j int) bool {
 			if desc {
-				return m.Messages[i] > m.Messages[j]
+				return m.Messages[i].ID > m.Messages[j].ID
 			}
-			return m.Messages[i] < m.Messages[j]
+			return m.Messages[i].ID < m.Messages[j].ID
 		})
 	}
 }
@@ -420,7 +432,7 @@ func fingerprint(dialogs []*tmessage.Dialog) string {
 		endian.PutUint64(b, uint64(tutil.GetInputPeerID(m.Peer)))
 		buf.Write(b)
 		for _, msg := range m.Messages {
-			endian.PutUint64(b, uint64(msg))
+			endian.PutUint64(b, uint64(msg.ID))
 			buf.Write(b)
 		}
 	}

@@ -31,10 +31,13 @@ func FromURL(ctx context.Context, pool dcpool.Pool, kvd storage.Storage, urls []
 
 			// init map value
 			if _, ok := msgMap[ch.ID()]; !ok {
-				msgMap[ch.ID()] = &Dialog{Peer: ch.InputPeer(), Messages: []int{}}
+				msgMap[ch.ID()] = &Dialog{Peer: ch.InputPeer(), Messages: []MessageItem{}}
 			}
 
-			msgMap[ch.ID()].Messages = append(msgMap[ch.ID()].Messages, msgid)
+			msgMap[ch.ID()].Messages = append(msgMap[ch.ID()].Messages, MessageItem{
+				ID:        msgid,
+				ChannelID: 0,
+			})
 		}
 
 		// cap is at least len of map

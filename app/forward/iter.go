@@ -113,9 +113,9 @@ func (i *iter) Next(ctx context.Context) bool {
 		return false
 	}
 
-	msg, err := tutil.GetSingleMessage(ctx, i.opts.pool.Default(ctx), from.InputPeer(), m)
+	msg, err := tutil.GetSingleMessage(ctx, i.opts.pool.Default(ctx), from.InputPeer(), m.ID)
 	if err != nil {
-		i.err = errors.Wrapf(err, "get message: %d", m)
+		i.err = errors.Wrapf(err, "get message: %d", m.ID)
 		return false
 	}
 

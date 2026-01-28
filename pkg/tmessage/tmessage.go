@@ -4,9 +4,14 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+type MessageItem struct {
+	ID        int
+	ChannelID int64 // 0 表示使用 Dialog 的 Peer
+}
+
 type Dialog struct {
 	Peer     tg.InputPeerClass
-	Messages []int
+	Messages []MessageItem
 }
 
 type ParseSource func() ([]*Dialog, error)

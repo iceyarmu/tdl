@@ -25,14 +25,15 @@ const (
 )
 
 type fMessage struct {
-	ID     int         `mapstructure:"id"`
-	Type   string      `mapstructure:"type"`
-	Time   string      `mapstructure:"date_unixtime"`
-	File   string      `mapstructure:"file"`
-	Photo  string      `mapstructure:"photo"`
-	FromID string      `mapstructure:"from_id"`
-	From   string      `mapstructure:"from"`
-	Text   interface{} `mapstructure:"text"`
+	ID        int         `mapstructure:"id"`
+	ChannelID int64       `mapstructure:"ChannelID"`
+	Type      string      `mapstructure:"type"`
+	Time      string      `mapstructure:"date_unixtime"`
+	File      string      `mapstructure:"file"`
+	Photo     string      `mapstructure:"photo"`
+	FromID    string      `mapstructure:"from_id"`
+	From      string      `mapstructure:"from"`
+	Text      interface{} `mapstructure:"text"`
 }
 
 func FromFile(ctx context.Context, pool dcpool.Pool, kvd storage.Storage, files []string, onlyMedia bool) ParseSource {
@@ -84,7 +85,7 @@ func collect(ctx context.Context, r io.Reader, peer peers.Peer, onlyMedia bool) 
 
 	m := &Dialog{
 		Peer:     peer.InputPeer(),
-		Messages: make([]int, 0),
+		Messages: make([]MessageItem, 0),
 	}
 
 	for mv := range d.Stream() {
@@ -110,7 +111,10 @@ func collect(ctx context.Context, r io.Reader, peer peers.Peer, onlyMedia bool) 
 				continue
 			}
 
-			m.Messages = append(m.Messages, fm.ID)
+			m.Messages = append(m.Messages, MessageItem{
+				ID:        fm.ID,
+				ChannelID: fm.ChannelID,
+			})
 		}
 	}
 

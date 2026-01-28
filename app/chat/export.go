@@ -49,12 +49,13 @@ type ExportOptions struct {
 }
 
 type Message struct {
-	ID   int         `json:"id"`
-	Type string      `json:"type"`
-	File string      `json:"file"`
-	Date int         `json:"date,omitempty"`
-	Text string      `json:"text,omitempty"`
-	Raw  *tg.Message `json:"raw,omitempty"`
+	ID        int         `json:"id"`
+	Type      string      `json:"type"`
+	File      string      `json:"file"`
+	ChannelID int64       `json:"ChannelID,omitempty"`
+	Date      int         `json:"date,omitempty"`
+	Text      string      `json:"text,omitempty"`
+	Raw       *tg.Message `json:"raw,omitempty"`
 }
 
 // ExportType
@@ -264,7 +265,7 @@ func Export(ctx context.Context, c *telegram.Client, kvd storage.Storage, opts E
 
 		urlOpts := opts
 		urlOpts.URLs = uniqueURLs
-		urlCount, err := exportURLMessages(ctx, c.API(), manager, pw, urlOpts, filter, enc)
+		urlCount, err := exportURLMessages(ctx, c.API(), manager, pw, urlOpts, filter, enc, id)
 		if err != nil {
 			return err
 		}
@@ -273,7 +274,7 @@ func Export(ctx context.Context, c *telegram.Client, kvd storage.Storage, opts E
 
 	// Export from URLs if -u is specified
 	if len(opts.URLs) > 0 {
-		urlCount, err := exportURLMessages(ctx, c.API(), manager, pw, opts, filter, enc)
+		urlCount, err := exportURLMessages(ctx, c.API(), manager, pw, opts, filter, enc, id)
 		if err != nil {
 			return err
 		}
@@ -285,7 +286,7 @@ func Export(ctx context.Context, c *telegram.Client, kvd storage.Storage, opts E
 }
 
 func exportURLMessages(ctx context.Context, api *tg.Client, manager *peers.Manager,
-	pw progress.Writer, opts ExportOptions, filter *vm.Program, enc *jx.Encoder) (int64, error) {
+	pw progress.Writer, opts ExportOptions, filter *vm.Program, enc *jx.Encoder, rootPeerID int64) (int64, error) {
 
 	color.Blue("URLs: %d message(s)", len(opts.URLs))
 
@@ -335,6 +336,10 @@ func exportURLMessages(ctx context.Context, api *tg.Client, manager *peers.Manag
 			ID:   msg.ID,
 			Type: "message",
 			File: fileName,
+		}
+		// 如果消息来自不同频道，记录 ChannelID
+		if peer.ID() != rootPeerID {
+			t.ChannelID = peer.ID()
 		}
 		if opts.WithContent {
 			t.Date = msg.Date
